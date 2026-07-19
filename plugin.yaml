@@ -1,0 +1,75 @@
+# Plugin: project-autopilot
+name: project-autopilot
+version: "0.5.0"
+description: "Project-scoped, lease-gated durable Development, verification, remediation, acceptance, checkpoint, and local commit workflows"
+
+author:
+  name: "Hermes Agent"
+  email: "hermes@nousresearch.com"
+
+# Plugin metadata
+min_hermes_version: "0.1.0"
+category: project-automation
+tags:
+  - project-management
+  - autonomous-agent
+  - safety-framework
+  - leases
+  - human-in-the-loop
+
+# Capabilities this plugin provides
+capabilities:
+  - project-registration
+  - autonomy-leases
+  - simulation-mode
+  - state-machine
+  - kill-switch
+  - audit-trail
+  - policy-engine
+  - execution-briefs
+  - handoff-validation
+  - controlled-run-packages
+  - autonomous-loop-supervisor
+  - durable-kanban-dispatch
+  - verification-profiles
+  - trusted-evidence
+  - bounded-remediation
+  - worktree-checkpoints
+  - one-time-commit-authorization
+  - recommended-choice-policy
+
+# Commands registered by this plugin
+commands:
+  - name: autopilot
+    description: "Project Autopilot — configure verification, dispatch/sync/stop durable workers, review evidence, accept, checkpoint, and separately authorize local commits"
+    usage: "/autopilot <command> [args]"
+    subcommands:
+      - status
+      - register
+      - lease
+      - projects
+      - use
+      - phases
+      - readiness
+      - verify
+      - start
+      - execute
+      - approve
+      - revoke
+      - run
+      - loop
+      - brief
+      - handoff
+      - simulate
+      - stop
+
+# Skills bundled with this plugin
+skills:
+  - path: skills/project-autopilot/SKILL.md
+    name: project-autopilot
+
+# Configuration schema (future use)
+config_schema: null
+
+# Entry point
+entrypoint: "autopilot"
