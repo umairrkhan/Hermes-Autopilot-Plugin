@@ -15,6 +15,7 @@ import shlex
 from typing import Any
 
 from .audit import redact_text
+from .constants import CAP_GIT_COMMIT, CAP_GIT_PUSH
 from .kill_switch import check_kill_switch
 from .lease import validate_lease
 from .storage import load_project_state
@@ -24,6 +25,7 @@ _ACTIVE_STATUSES = {
     "QUEUED",
     "RUNNING",
     "VERIFYING",
+    "MERGING",
     "REMEDIATING",
     "NEEDS_HUMAN",
     "AWAITING_HUMAN_ACCEPTANCE",
@@ -60,6 +62,7 @@ _GIT_READ_SUBCOMMANDS = {
     "check-ignore",
     "blame",
 }
+_GIT_WRITE_SUBCOMMANDS = {"add", "commit", "push"}
 _SHELL_OPERATORS = {"&&", "||", ";", "|", "&", ">", ">>", "<", "<<"}
 _PATH_KEYS = {"path", "workdir"}
 _GIT_REPOSITORY_OVERRIDE_OPTIONS = {
@@ -178,6 +181,70 @@ def _matches_option(token: str, options: set[str]) -> bool:
     return any(token == option or token.startswith(f"{option}=") for option in options)
 
 
+def _target_branch(binding: dict[str, Any]) -> str | None:
+    starting_revision = binding.get("starting_revision")
+    prefix = "ref: refs/heads/"
+    branch = (
+        starting_revision[len(prefix):]
+        if isinstance(starting_revision, str) and starting_revision.startswith(prefix)
+        else "Development"
+    )
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", branch)
+        or ".." in branch
+        or "//" in branch
+        or "@{" in branch
+        or branch.endswith(("/", ".", ".lock"))
+    ):
+        return None
+    return branch
+
+
+def _git_write_violation(
+    tokens: list[str],
+    *,
+    subcommand: str,
+    role: str,
+    binding: dict[str, Any],
+    git_policy: str,
+    granted_capabilities: tuple[str, ...],
+) -> str | None:
+    """Allow only the exact host-generated promotion commands."""
+
+    if role != "development" or binding.get("status") != "MERGING":
+        return f"git {subcommand} is authorized only for Development during the merge phase."
+    if git_policy != "allow-list":
+        return f"git {subcommand} is not authorized by this lease."
+    required_capability = CAP_GIT_PUSH if subcommand == "push" else CAP_GIT_COMMIT
+    if required_capability not in granted_capabilities:
+        return f"git {subcommand} is not authorized by this lease."
+
+    branch = _target_branch(binding)
+    if branch is None:
+        return "the loop target branch is invalid."
+    task_id = binding.get("development_task_id")
+    brief_id = binding.get("brief_id")
+    if not isinstance(task_id, str) or not isinstance(brief_id, str):
+        return "the loop promotion identity is invalid."
+    subject = f"autopilot({task_id}): {brief_id}"
+    body = "Automated commit by Autopilot post-verification."
+    allowed_commands = {
+        "add": {
+            ("git", "add", "--all"),
+            ("git", "add", "-A"),
+        },
+        "commit": {
+            ("git", "commit", "-m", subject, "-m", body),
+        },
+        "push": {
+            ("git", "push", "origin", f"HEAD:refs/heads/{branch}"),
+        },
+    }
+    if tuple(tokens) not in allowed_commands[subcommand]:
+        return f"git {subcommand} must match the exact post-verification promotion command."
+    return None
+
+
 def _terminal_violation(
     command_args: dict[str, Any],
     *,
@@ -185,6 +252,9 @@ def _terminal_violation(
     role: str,
     worktree: Path,
     process_cwd: Path,
+    binding: dict[str, Any],
+    git_policy: str,
+    granted_capabilities: tuple[str, ...],
 ) -> str | None:
     if command_args.get("background") or command_args.get("pty"):
         return "background and interactive terminal commands are not allowed."
@@ -216,10 +286,19 @@ def _terminal_violation(
         if any(Path(token).is_absolute() or ".." in Path(token).parts for token in tokens[1:] if not token.startswith("-")):
             return "git command paths must remain inside the isolated worktree."
         subcommand = next((token for token in tokens[1:] if not token.startswith("-")), "")
-        if subcommand not in _GIT_READ_SUBCOMMANDS:
-            label = f"git {subcommand}".strip()
-            return f"{label} is not authorized by this lease."
-        return None
+        if subcommand in _GIT_READ_SUBCOMMANDS:
+            return None
+        if subcommand in _GIT_WRITE_SUBCOMMANDS:
+            return _git_write_violation(
+                tokens,
+                subcommand=subcommand,
+                role=role,
+                binding=binding,
+                git_policy=git_policy,
+                granted_capabilities=granted_capabilities,
+            )
+        label = f"git {subcommand}".strip()
+        return f"{label} is not authorized by this lease."
 
     configured_commands: list[Any] = [] if profile is None else list(profile.checks)
     if profile is not None and role != "verifier":
@@ -386,6 +465,9 @@ def pre_tool_call_guard(
             role=str(role or "development"),
             worktree=worktree,
             process_cwd=process_cwd,
+            binding=binding,
+            git_policy=lease.git_policy,
+            granted_capabilities=lease.granted_capabilities,
         )
         if violation:
             return _block(violation)

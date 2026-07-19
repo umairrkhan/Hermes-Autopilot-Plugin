@@ -12,7 +12,7 @@ from typing import Any
 
 from .constants import (
     CAP_WORKSPACE_READ, CAP_GIT_READ,
-    CAP_WORKSPACE_WRITE, CAP_GIT_COMMIT,
+    CAP_WORKSPACE_WRITE, CAP_GIT_COMMIT, CAP_GIT_PUSH,
 )
 from .lease import validate_lease, validate_lease_expired
 from .policy import check_capability, validate_lease_for_workspace
@@ -85,8 +85,14 @@ PHASES: tuple[PhaseDefinition, ...] = (
         number=PHASE_4,
         name="Supervised Durable Development Loop",
         status="complete",
-        description="Dispatch lease-gated Kanban workers in isolated worktrees, independently verify, remediate within bounds, require human acceptance, checkpoint, and separately authorize a local commit.",
-        required_capabilities=(CAP_WORKSPACE_READ, CAP_GIT_READ, CAP_WORKSPACE_WRITE),
+        description="Dispatch lease-gated Kanban workers in isolated worktrees, independently verify, remediate within bounds, promote verified commits to the target branch, and require human acceptance.",
+        required_capabilities=(
+            CAP_WORKSPACE_READ,
+            CAP_GIT_READ,
+            CAP_WORKSPACE_WRITE,
+            CAP_GIT_COMMIT,
+            CAP_GIT_PUSH,
+        ),
         real_side_effects_allowed=True,
     ),
 )

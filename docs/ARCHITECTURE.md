@@ -81,7 +81,7 @@ Development uses Hermes Kanban `worktree` workspace mode. The verifier uses `dir
 - reloads global kill state and project lease before each tool invocation;
 - validates loop/task/lease binding and absolute expiry;
 - validates current process CWD and file paths against the isolated worktree;
-- blocks unknown/external tools, cross-task/board Kanban access, artifact uploads, delegation, cron, local-image access, background terminal commands, shell control operators, writes by verifier role, and non-read-only Git;
+- blocks unknown/external tools, cross-task/board Kanban access, artifact uploads, delegation, cron, local-image access, background terminal commands, shell control operators, writes by verifier role, and Git writes outside the exact post-verification promotion allowlist;
 - requires every non-Git terminal invocation to match one configured verification argv and declared cwd exactly;
 - rejects Git repository/worktree overrides, output/external-helper/pager options, and path escape;
 - rejects completion metadata containing recognizable unredacted secrets or personal identifiers before Kanban persistence;
@@ -103,11 +103,23 @@ Verifier metadata is validated against:
 - exact argv/cwd, exit code, duration, and required bounded excerpts;
 - bounded findings and residual risk.
 
-Malformed metadata moves to `NEEDS_HUMAN`. Valid failed/rejected evidence may queue only the configured number of remediation cycles. Valid passed/approved evidence is stored immutably and moves to `AWAITING_HUMAN_ACCEPTANCE`, never directly to accepted.
+Malformed metadata moves to `NEEDS_HUMAN`. Valid failed/rejected evidence may queue only the configured number of remediation cycles. Valid passed/approved evidence is stored immutably, enters `MERGING`, and is committed and pushed by the host-controlled reconciler before moving to `AWAITING_HUMAN_ACCEPTANCE`.
 
 `/autopilot loop accept` revalidates the project-scoped result path/provenance and writes a separate immutable acceptance record.
 
-## Checkpoint and Commit Separation
+## Verified Worktree Promotion
+
+After accepted verifier evidence, `LoopReconciler`:
+
+1. Resolves `.worktrees/<development_task_id>` beneath the registered workspace and verifies it is the Git worktree root.
+2. Requires the autonomous lease's `git.commit` and `git.push` capabilities and `allow-list` Git policy.
+3. Stages all verified worktree changes and creates a structured `autopilot(<task_id>): <brief_id>` commit.
+4. Records the commit revision in the durable loop before pushing `HEAD` to the bound target branch (default `Development`).
+5. Fails closed to `NEEDS_HUMAN` on staging, commit, revision, or push failure. The worktree is retained for diagnostics.
+
+The push is a normal fast-forward Git push; the workflow does not force-push or perform a branch merge.
+
+## Legacy Checkpoint and Commit Separation
 
 After acceptance:
 
@@ -115,7 +127,7 @@ After acceptance:
 2. `loop authorize-commit` revalidates source status, worktree status, live bytes, checkpoint provenance, the exact archive member set, every archived file size/hash, and the recomputed canonical content digest, then writes a one-time 15-minute authorization.
 3. `loop commit` repeats the archive and live-worktree validation, stages and commits only in the isolated worktree, marks authorization used, and records the verified commit revision.
 
-No operation pushes, merges, deploys, migrates, or mutates the original workspace.
+These legacy manual checkpoint commands do not push, merge, deploy, migrate, or mutate the original workspace.
 
 ## Cancellation
 

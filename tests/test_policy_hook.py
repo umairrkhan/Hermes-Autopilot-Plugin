@@ -43,8 +43,10 @@ def _active_task(tmp_hermes_home: Path, tmp_workspace: Path, *, expired: bool = 
         "project_id": "test-project-001",
         "lease_id": lease.lease_id,
         "status": "QUEUED",
+        "brief_id": "brief-1",
         "development_task_id": "task-dev",
         "verifier_task_id": "task-verify",
+        "starting_revision": "ref: refs/heads/Development",
         "workspace_root": str(tmp_workspace),
     }
     (loops / "loop_loop-test.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -135,7 +137,7 @@ def test_unbound_autopilot_tenant_worker_fails_closed(tmp_hermes_home, monkeypat
     assert "no valid durable loop binding" in decision["message"].lower()
 
 
-def test_needs_human_loop_blocks_work_but_allows_kanban_block(
+def test_needs_human_loop_allows_work_and_kanban_block(
     tmp_hermes_home,
     tmp_workspace,
     monkeypatch,
@@ -163,8 +165,7 @@ def test_needs_human_loop_blocks_work_but_allows_kanban_block(
         task_id="task-dev",
     )
 
-    assert denied is not None
-    assert "not active" in denied["message"].lower()
+    assert denied is None, "NEEDS_HUMAN is now an active status — work tools should pass"
     assert report is None
 
 
@@ -211,6 +212,58 @@ def test_active_task_blocks_git_commit(tmp_hermes_home, tmp_workspace, monkeypat
     assert decision is not None
     assert decision["action"] == "block"
     assert "git commit" in decision["message"].lower()
+
+
+def test_merge_phase_allows_only_exact_promotion_git_commands(
+    tmp_hermes_home,
+    tmp_workspace,
+    monkeypatch,
+):
+    _active_task(tmp_hermes_home, tmp_workspace)
+    loop_path = (
+        tmp_hermes_home / "state" / "autopilot" / "projects" /
+        "test-project-001" / "loops" / "loop_loop-test.json"
+    )
+    loop = json.loads(loop_path.read_text(encoding="utf-8"))
+    loop["status"] = "MERGING"
+    loop_path.write_text(json.dumps(loop), encoding="utf-8")
+    worktree = tmp_workspace / ".worktrees" / "task-dev"
+    worktree.mkdir(parents=True)
+    monkeypatch.chdir(worktree)
+
+    commands = (
+        "git add --all",
+        "git commit -m 'autopilot(task-dev): brief-1' "
+        "-m 'Automated commit by Autopilot post-verification.'",
+        "git push origin HEAD:refs/heads/Development",
+    )
+    decisions = [
+        pre_tool_call_guard(
+            tool_name="terminal",
+            args={"command": command, "workdir": str(worktree)},
+            task_id="task-dev",
+        )
+        for command in commands
+    ]
+    wrong_target = pre_tool_call_guard(
+        tool_name="terminal",
+        args={
+            "command": "git push origin HEAD:refs/heads/main",
+            "workdir": str(worktree),
+        },
+        task_id="task-dev",
+    )
+    verifier_push = pre_tool_call_guard(
+        tool_name="terminal",
+        args={"command": commands[-1], "workdir": str(worktree)},
+        task_id="task-verify",
+    )
+
+    assert decisions == [None, None, None]
+    assert wrong_target is not None
+    assert "exact post-verification" in wrong_target["message"].lower()
+    assert verifier_push is not None
+    assert "development during the merge phase" in verifier_push["message"].lower()
 
 
 def test_verifier_cannot_write_files(tmp_hermes_home, tmp_workspace, monkeypatch):

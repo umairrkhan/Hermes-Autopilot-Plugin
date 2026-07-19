@@ -14,7 +14,7 @@ from .verification import load_verification_profile
 
 logger = logging.getLogger(__name__)
 
-_RECOVERABLE_STATUSES = {"QUEUED", "RUNNING", "VERIFYING", "REMEDIATING"}
+_RECOVERABLE_STATUSES = {"QUEUED", "RUNNING", "VERIFYING", "MERGING", "REMEDIATING"}
 
 
 def recover_active_loops(

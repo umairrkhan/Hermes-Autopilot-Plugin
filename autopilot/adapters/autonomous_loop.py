@@ -3,8 +3,8 @@
 This supervisor is the plugin-side control plane for the user's Discussion ↔
 Development workflow. It records a durable loop contract, enforces the active
 lease/brief boundaries, stores status, and captures Development results for
-Discussion review. It deliberately does not bypass Hermes approvals, push code,
-deploy, or write directly to Hermes session databases.
+Discussion review. Post-verification promotion is lease-gated and host-controlled;
+the supervisor does not deploy or write directly to Hermes session databases.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from uuid import uuid4
 
 from ..audit import log_event, redact_text
 from ..constants import (
+    CAP_GIT_COMMIT,
+    CAP_GIT_PUSH,
     CAP_GIT_READ,
     CAP_NEXT_PHASE,
     CAP_USER_INTERACTION,
@@ -44,6 +46,8 @@ REQUIRED_AUTONOMOUS_CAPABILITIES = (
     CAP_WORKSPACE_READ,
     CAP_GIT_READ,
     CAP_WORKSPACE_WRITE,
+    CAP_GIT_COMMIT,
+    CAP_GIT_PUSH,
     CAP_NEXT_PHASE,
     CAP_USER_INTERACTION,
 )
@@ -415,6 +419,7 @@ class AutonomousLoopSupervisor:
             "QUEUED",
             "RUNNING",
             "VERIFYING",
+            "MERGING",
             "REMEDIATING",
             "NEEDS_HUMAN",
             "CANCEL_REQUESTED",

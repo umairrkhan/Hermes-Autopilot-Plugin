@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
+import re
 from typing import Any
 
+from ..constants import CAP_GIT_COMMIT, CAP_GIT_PUSH
 from ..evidence import validate_verifier_evidence
 from ..kill_switch import check_kill_switch
-from ..lease import validate_lease, validate_lease_expired
+from ..lease import AutonomyLease, validate_lease, validate_lease_expired
+from ..policy import check_capability, validate_lease_for_workspace
 from ..verification import VerificationProfile, verification_profile_digest
 from .autonomous_loop import AutonomousLoopSupervisor
 from .development_executor import CommandRuntime, DevelopmentExecutor
@@ -19,6 +23,15 @@ class SyncResult:
     status: str
     message: str
     evidence_path: str = ""
+    commit_revision: str = ""
+    blockers: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MergeResult:
+    success: bool
+    commit_revision: str = ""
+    target_branch: str = ""
     blockers: list[str] = field(default_factory=list)
 
 
@@ -53,6 +66,187 @@ class LoopReconciler:
             project_id=str(loop["project_id"]),
             loop_id=str(loop["loop_id"]),
             status=status,
+        )
+
+    @staticmethod
+    def _target_branch(starting_revision: str) -> str:
+        prefix = "ref: refs/heads/"
+        branch = (
+            starting_revision[len(prefix):]
+            if starting_revision.startswith(prefix)
+            else "Development"
+        )
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", branch)
+            or ".." in branch
+            or "//" in branch
+            or "@{" in branch
+            or branch.endswith(("/", ".", ".lock"))
+        ):
+            return ""
+        return branch
+
+    def _merge_worktree(
+        self,
+        *,
+        loop: dict[str, Any],
+        lease: AutonomyLease,
+    ) -> MergeResult:
+        """Commit and push only the verified Development worktree."""
+
+        project_id = loop.get("project_id")
+        loop_id = loop.get("loop_id")
+        task_id = loop.get("development_task_id")
+        brief_id = loop.get("brief_id")
+        workspace_raw = loop.get("workspace_root")
+        starting_revision = loop.get("starting_revision")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                project_id,
+                loop_id,
+                task_id,
+                brief_id,
+                workspace_raw,
+                starting_revision,
+            )
+        ):
+            return MergeResult(False, blockers=["Loop promotion binding is incomplete."])
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(task_id)):
+            return MergeResult(False, blockers=["Development task id is unsafe for promotion."])
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", str(brief_id)):
+            return MergeResult(False, blockers=["Brief id is unsafe for the commit message."])
+
+        target_branch = self._target_branch(str(starting_revision))
+        if not target_branch:
+            return MergeResult(False, blockers=["Loop target branch is invalid."])
+        if lease.git_policy != "allow-list":
+            return MergeResult(False, target_branch=target_branch, blockers=[
+                "Active lease does not authorize post-verification Git promotion."
+            ])
+        for capability in (CAP_GIT_COMMIT, CAP_GIT_PUSH):
+            granted, message = check_capability(lease, capability)
+            if not granted:
+                return MergeResult(False, target_branch=target_branch, blockers=[message])
+        workspace_valid, workspace_error = validate_lease_for_workspace(
+            lease,
+            str(workspace_raw),
+        )
+        if not workspace_valid:
+            return MergeResult(False, target_branch=target_branch, blockers=[workspace_error])
+
+        try:
+            workspace = Path(str(workspace_raw)).expanduser().resolve(strict=True)
+            worktrees_root = (workspace / ".worktrees").resolve(strict=True)
+            worktree = (worktrees_root / str(task_id)).resolve(strict=True)
+            worktree.relative_to(worktrees_root)
+        except (OSError, RuntimeError, ValueError):
+            return MergeResult(False, target_branch=target_branch, blockers=[
+                "Verified Development worktree is missing or unsafe."
+            ])
+
+        git_root = self._runtime.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            cwd=str(worktree),
+            timeout_seconds=60,
+        )
+        try:
+            resolved_git_root = Path(git_root.stdout.strip()).resolve(strict=True)
+        except (OSError, RuntimeError):
+            resolved_git_root = Path()
+        if git_root.exit_code != 0 or resolved_git_root != worktree:
+            return MergeResult(False, target_branch=target_branch, blockers=[
+                "Promotion path is not the bound Git worktree."
+            ])
+
+        subject = f"autopilot({task_id}): {brief_id}"
+        body = "Automated commit by Autopilot post-verification."
+        status = self._runtime.run(
+            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            cwd=str(worktree),
+            timeout_seconds=60,
+        )
+        if status.exit_code != 0:
+            return MergeResult(False, target_branch=target_branch, blockers=[
+                "Verified worktree status could not be inspected before promotion."
+            ])
+
+        commit_revision = ""
+        if status.stdout:
+            staged = self._runtime.run(
+                ("git", "add", "--all"),
+                cwd=str(worktree),
+                timeout_seconds=60,
+            )
+            if staged.exit_code != 0:
+                return MergeResult(False, target_branch=target_branch, blockers=[
+                    "Git staging failed in the verified worktree."
+                ])
+            committed = self._runtime.run(
+                ("git", "commit", "-m", subject, "-m", body),
+                cwd=str(worktree),
+                timeout_seconds=120,
+            )
+            if committed.exit_code != 0:
+                return MergeResult(False, target_branch=target_branch, blockers=[
+                    "Git commit failed in the verified worktree."
+                ])
+        else:
+            last_subject = self._runtime.run(
+                ("git", "log", "-1", "--pretty=%s"),
+                cwd=str(worktree),
+                timeout_seconds=60,
+            )
+            bound_revision = loop.get("commit_revision")
+            has_bound_revision = isinstance(bound_revision, str) and bool(bound_revision)
+            if last_subject.exit_code != 0 or (
+                last_subject.stdout.strip() != subject
+                and not has_bound_revision
+            ):
+                return MergeResult(False, target_branch=target_branch, blockers=[
+                    "Verified worktree has no changes to promote."
+                ])
+
+        revision = self._runtime.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=str(worktree),
+            timeout_seconds=60,
+        )
+        commit_revision = revision.stdout.strip()
+        if revision.exit_code != 0 or not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit_revision):
+            return MergeResult(False, target_branch=target_branch, blockers=[
+                "Promoted commit revision could not be verified."
+            ])
+        bound_revision = loop.get("commit_revision")
+        if isinstance(bound_revision, str) and bound_revision and bound_revision != commit_revision:
+            return MergeResult(False, commit_revision=commit_revision, target_branch=target_branch, blockers=[
+                "Worktree HEAD no longer matches the loop's recorded promotion revision."
+            ])
+
+        persisted = self._supervisor.mark_status(
+            project_id=str(project_id),
+            loop_id=str(loop_id),
+            status="MERGING",
+            commit_revision=commit_revision,
+        )
+        if persisted is None:
+            return MergeResult(False, commit_revision=commit_revision, target_branch=target_branch, blockers=[
+                "Commit revision could not be bound before push."
+            ])
+
+        pushed = self._runtime.run(
+            ("git", "push", "origin", f"HEAD:refs/heads/{target_branch}"),
+            cwd=str(worktree),
+            timeout_seconds=180,
+        )
+        if pushed.exit_code != 0:
+            return MergeResult(False, commit_revision=commit_revision, target_branch=target_branch, blockers=[
+                f"Verified commit could not be pushed to {target_branch}."
+            ])
+        return MergeResult(
+            True,
+            commit_revision=commit_revision,
+            target_branch=target_branch,
         )
 
     def cancel(self, *, loop: dict[str, Any], reason: str) -> SyncResult:
@@ -175,6 +369,19 @@ class LoopReconciler:
         if not lease_valid or lease.lease_id != loop["lease_id"]:
             return self.cancel(loop=loop, reason=lease_error or "Loop lease was replaced")
 
+        existing_revision = loop.get("commit_revision")
+        if (
+            loop.get("status") == "AWAITING_HUMAN_ACCEPTANCE"
+            and isinstance(existing_revision, str)
+            and re.fullmatch(r"[0-9a-fA-F]{7,64}", existing_revision)
+        ):
+            return SyncResult(
+                "AWAITING_HUMAN_ACCEPTANCE",
+                "Verified worktree was already promoted; human acceptance is still required.",
+                evidence_path=str(loop.get("result_artifact_path", "")),
+                commit_revision=existing_revision,
+            )
+
         board = str(loop["board_slug"])
         development_task_id = str(loop["development_task_id"])
         verifier_task_id = str(loop["verifier_task_id"])
@@ -276,8 +483,55 @@ class LoopReconciler:
         except (OSError, ValueError) as exc:
             self._set_status(loop, "NEEDS_HUMAN")
             return SyncResult("NEEDS_HUMAN", "Validated evidence could not be persisted.", blockers=[str(exc)])
+
+        merging = self._supervisor.mark_status(
+            project_id=project_id,
+            loop_id=loop_id,
+            status="MERGING",
+        )
+        if merging is None:
+            self._set_status(loop, "NEEDS_HUMAN")
+            return SyncResult(
+                "NEEDS_HUMAN",
+                "Verification passed, but the merge phase could not be persisted.",
+                evidence_path=evidence_path,
+            )
+        merged = self._merge_worktree(loop=merging, lease=lease)
+        if not merged.success:
+            fields: dict[str, Any] = {}
+            if merged.commit_revision:
+                fields["commit_revision"] = merged.commit_revision
+            self._supervisor.mark_status(
+                project_id=project_id,
+                loop_id=loop_id,
+                status="NEEDS_HUMAN",
+                **fields,
+            )
+            return SyncResult(
+                "NEEDS_HUMAN",
+                "Verification passed, but automatic worktree promotion failed.",
+                evidence_path=evidence_path,
+                commit_revision=merged.commit_revision,
+                blockers=merged.blockers,
+            )
+        promoted = self._supervisor.mark_status(
+            project_id=project_id,
+            loop_id=loop_id,
+            status="AWAITING_HUMAN_ACCEPTANCE",
+            commit_revision=merged.commit_revision,
+        )
+        if promoted is None:
+            return SyncResult(
+                "NEEDS_HUMAN",
+                "The verified commit was pushed, but its loop binding could not be finalized.",
+                evidence_path=evidence_path,
+                commit_revision=merged.commit_revision,
+                blockers=[f"Pushed revision {merged.commit_revision} requires binding repair."],
+            )
         return SyncResult(
             "AWAITING_HUMAN_ACCEPTANCE",
-            "Verification and independent review passed. Human acceptance is still required.",
+            f"Verification passed and {merged.commit_revision} was pushed to "
+            f"{merged.target_branch}. Human acceptance is still required.",
             evidence_path=evidence_path,
+            commit_revision=merged.commit_revision,
         )

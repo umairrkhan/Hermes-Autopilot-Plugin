@@ -134,11 +134,13 @@ def build_lease_preset(
         lease_prefix = "lease-auto"
         scope = "Autonomous development session with recommended-choice policy"
         capabilities = AUTONOMOUS_DEVELOPMENT_CAPABILITIES
-        git_policy = "read-only"
+        git_policy = "allow-list"
         notes = (
             "Fixed guarded preset: autonomous development session. "
             "Allows workspace edits and low-risk recommended-choice handling. "
-            "Local commits, pushes, external writes, database writes, and deployment remain denied."
+            "Git add, commit, and push are allowed only during host-controlled "
+            "post-verification promotion. Other Git writes, external writes, "
+            "database writes, and deployment remain denied."
         )
 
     lease_id = f"{lease_prefix}-{created.strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}"

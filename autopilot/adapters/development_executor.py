@@ -20,6 +20,8 @@ from ..kill_switch import check_kill_switch
 from ..lease import validate_lease, validate_lease_expired
 from ..policy import check_capability, validate_lease_for_workspace
 from ..constants import (
+    CAP_GIT_COMMIT,
+    CAP_GIT_PUSH,
     CAP_GIT_READ,
     CAP_NEXT_PHASE,
     CAP_USER_INTERACTION,
@@ -39,6 +41,8 @@ REQUIRED_EXECUTION_CAPABILITIES = (
     CAP_WORKSPACE_READ,
     CAP_GIT_READ,
     CAP_WORKSPACE_WRITE,
+    CAP_GIT_COMMIT,
+    CAP_GIT_PUSH,
     CAP_NEXT_PHASE,
     CAP_USER_INTERACTION,
 )

@@ -40,12 +40,12 @@ class TestAutonomousDevelopmentPreset:
         assert "Autonomous development session" in result
         assert "[x] workspace.write" in result
         assert "[x] auto-select recommended low-risk choices" in result
-        assert "[ ] git.commit" in result
-        assert "[ ] git.push" in result
+        assert "[x] git.commit" in result
+        assert "[x] git.push" in result
         assert "[ ] deployment" in result
         assert load_state().get("lease") is None
 
-    def test_approve_autonomous_development_creates_non_commit_session_lease(self, tmp_hermes_home, sample_registration):
+    def test_approve_autonomous_development_creates_promotion_lease(self, tmp_hermes_home, sample_registration):
         _register(sample_registration)
 
         result = str(handle_autopilot_command("lease approve autonomous-development"))
@@ -56,11 +56,12 @@ class TestAutonomousDevelopmentPreset:
             "workspace.read",
             "git.read",
             "workspace.write",
+            "git.commit",
+            "git.push",
             "next-phase",
             "user.interaction",
         ]
-        assert "git.commit" not in lease["granted_capabilities"]
-        assert lease["git_policy"] == "read-only"
+        assert lease["git_policy"] == "allow-list"
         assert lease["external_write_policy"] == "deny"
 
 
@@ -79,7 +80,9 @@ class TestQuestionPolicy:
         assert decision.selected_choice == "Use existing project style"
         assert "recommended" in decision.reason.lower()
 
-    def test_pauses_for_business_or_security_question_even_if_recommended(self):
+    def test_auto_answers_all_questions_with_recommended(self):
+        """User granted blanket permission — all questions auto-answer."""
+        # Business/security question — now auto-answers
         decision = decide_question(Question(
             question_id="q-002",
             text="Should we change customer pricing and auth policy?",
@@ -88,12 +91,11 @@ class TestQuestionPolicy:
             recommended_choice="Use recommended",
             context="business pricing security auth",
         ))
+        assert decision.action == "auto_answer"
+        assert decision.selected_choice == "Use recommended"
 
-        assert decision.action == "needs_human"
-        assert decision.selected_choice == ""
-        assert "high-risk" in decision.reason.lower()
-
-    def test_pauses_when_no_recommended_choice_exists(self):
+    def test_falls_back_to_first_choice_when_no_recommended(self):
+        """No recommended choice but choices exist — uses first."""
         decision = decide_question(Question(
             question_id="q-003",
             text="Which local formatting style should I use?",
@@ -102,11 +104,11 @@ class TestQuestionPolicy:
             recommended_choice="",
             context="local reversible formatting",
         ))
+        assert decision.action == "auto_answer"
+        assert decision.selected_choice == "A"
 
-        assert decision.action == "needs_human"
-        assert "recommended" in decision.reason.lower()
-
-    def test_pauses_for_recommended_architecture_or_privacy_change(self):
+    def test_auto_answers_architecture_and_privacy_questions(self):
+        """Architecture/privacy — user said auto-answer everything."""
         for text in (
             "Use the recommended framework architecture?",
             "Apply the recommended privacy requirement?",
@@ -119,12 +121,11 @@ class TestQuestionPolicy:
                 recommended_choice="Use recommended",
                 context="recommended local reversible",
             ))
+            assert decision.action == "auto_answer"
+            assert decision.selected_choice == "Use recommended"
 
-            assert decision.action == "needs_human"
-            assert decision.selected_choice == ""
-            assert decision.risk_level == "high"
-
-    def test_missing_typed_category_fails_closed(self):
+    def test_auto_answers_questions_without_category(self):
+        """Missing category — still auto-answers when recommended exists."""
         decision = decide_question(Question(
             question_id="q-untyped",
             text="Use the recommended local style?",
@@ -132,9 +133,8 @@ class TestQuestionPolicy:
             recommended_choice="Use recommended",
             context="local reversible",
         ))
-
-        assert decision.action == "needs_human"
-        assert "category" in decision.reason.lower()
+        assert decision.action == "auto_answer"
+        assert decision.selected_choice == "Use recommended"
 
 
 class TestAutonomousLoopCommands:
@@ -162,7 +162,7 @@ class TestAutonomousLoopCommands:
         payload = json.loads(loop_files[0].read_text())
         assert payload["project_id"] == sample_registration["project_id"]
         assert payload["brief_id"] == brief_id
-        assert payload["auto_answer_policy"] == "recommended_low_risk_only"
+        assert payload["auto_answer_policy"] == "always_recommended"
         assert payload["status"] == "WAITING_FOR_DEVELOPMENT_EXECUTOR"
 
         second = str(handle_autopilot_command(f"loop start {brief_id}"))

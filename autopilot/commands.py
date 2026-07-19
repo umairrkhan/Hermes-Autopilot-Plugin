@@ -519,11 +519,20 @@ def _cmd_lease_approve(preset_name: str) -> str:
         summary = "Workspace writes and local commits may be prepared only for explicitly approved briefs."
     elif preset_name == LEASE_PRESET_AUTONOMOUS_DEVELOPMENT:
         title = "Autonomous development session"
-        summary = "Workspace edits and low-risk recommended choices are allowed; commits/push/deploy remain denied."
+        summary = (
+            "Workspace edits and low-risk recommended choices are allowed; "
+            "verified worktree changes are committed and pushed by the host-controlled promotion step."
+        )
     else:
         title = "Phase 2 read-only handoff"
         summary = "This lease authorizes read-only brief/handoff preparation only; it does not authorize execution."
 
+    boundary = (
+        "Git add/commit/push are restricted to post-verification promotion; "
+        "merge, release, external-write, database-write, and deployment remain denied."
+        if preset_name == LEASE_PRESET_AUTONOMOUS_DEVELOPMENT
+        else "Push, external-write, database-write, and deployment permissions remain denied."
+    )
     return "\n".join([
         f"=== Lease approved: {title} ===",
         f"Lease ID: {lease.lease_id}",
@@ -532,7 +541,7 @@ def _cmd_lease_approve(preset_name: str) -> str:
         f"Created at (UTC): {lease.created_at}",
         f"Expires (UTC): {lease.expiry}",
         f"Capabilities: {list(lease.granted_capabilities)}",
-        "Push, external-write, database-write, and deployment permissions remain denied.",
+        boundary,
         summary,
     ])
 
@@ -567,11 +576,12 @@ def _cmd_lease_request(preset_name: str = LEASE_PRESET_PHASE2_READONLY) -> str:
             "[x] workspace.read — read registered workspace context",
             "[x] git.read — inspect repository state and history",
             "[x] workspace.write — implement approved phase changes in workspace",
+            "[x] git.commit — host-controlled commit after verification passes",
+            "[x] git.push — push the verified commit to the bound target branch",
             "[x] next-phase — continue approved Discussion→Development loop",
             "[x] user.interaction — auto-select recommended low-risk choices",
             "[x] auto-select recommended low-risk choices — routine only",
-            "[ ] git.commit — NOT granted",
-            "[ ] git.push / merge / release — NOT granted",
+            "[ ] git.merge / release — NOT granted",
             "[ ] deployment / dependencies / database writes — NOT granted",
         ]
     else:
@@ -1222,6 +1232,8 @@ def _cmd_loop(raw: str, *, runtime: Any | None = None) -> str:
         ]
         if synced.evidence_path:
             lines.append(f"Evidence: {synced.evidence_path}")
+        if synced.commit_revision:
+            lines.append(f"Commit revision: {synced.commit_revision}")
         if synced.blockers:
             lines.append("Blockers:")
             lines.extend(f"- {blocker}" for blocker in synced.blockers)

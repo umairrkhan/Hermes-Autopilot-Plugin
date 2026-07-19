@@ -9,7 +9,7 @@ A project-scoped Hermes plugin for lease-gated, human-supervised software delive
 1. **Foundation / Offline Simulation** — registration, isolated state, leases, policy, state machine, kill switch, audit, simulation.
 2. **Guarded Read-Only Handoff** — structured Discussion→Development briefs and handoff validation.
 3. **Controlled Development Run Packages** — explicit brief approval and non-executing Development-session packages.
-4. **Supervised Durable Development Loop** — real Kanban dispatch, isolated worktree edits, independent verification, bounded remediation, durable evidence, human acceptance, checkpointing, and separately authorized local commits.
+4. **Supervised Durable Development Loop** — real Kanban dispatch, isolated worktree edits, independent verification, bounded remediation, durable evidence, post-verification promotion, and human acceptance.
 
 ## How This Replaces the Manual Two-Chat Cycle
 
@@ -24,7 +24,7 @@ A project-scoped Hermes plugin for lease-gated, human-supervised software delive
 
 The registered Discussion and Development session IDs are **provenance and boundary metadata**. Public Hermes plugin APIs do not support injecting messages into an arbitrary GUI session, so Autopilot never writes the session database or claims that a Kanban worker ran inside either registered chat. Live implementation and verification run in dedicated Hermes Kanban worker sessions; the Discussion session remains the human authority where commands, decisions, evidence review, and acceptance occur.
 
-A Development/remediation/verifier worker never commits or pushes. The optional local worktree commit sequence is separate and requires three explicit commands after human acceptance. There is no push command.
+A Development/remediation/verifier worker never commits or pushes during implementation or verification. After verification passes, the host-controlled reconciler stages and commits the bound worktree, then pushes `HEAD` to the target branch recorded by the loop (defaulting to `Development`).
 
 ## Live Execution Architecture
 
@@ -51,7 +51,7 @@ Lifecycle reconciliation
         ├─ session-start and activity-throttled recovery: bounded active-loop reconciliation
         ├─ /autopilot loop sync: explicit authoritative recovery path
         ├─ failed verification: bounded remediation + re-verification
-        └─ passed verification: AWAITING_HUMAN_ACCEPTANCE (never auto-accepted)
+        └─ passed verification: commit + push verified worktree, then AWAITING_HUMAN_ACCEPTANCE
 ```
 
 The plugin uses public Hermes surfaces: `PluginContext.dispatch_tool("terminal", …)`, plugin hooks, Hermes Projects, and the `hermes kanban` CLI. It does not write Hermes session/Kanban SQLite files or use background delegation as a durability mechanism.
@@ -61,13 +61,13 @@ The plugin uses public Hermes surfaces: `PluginContext.dispatch_tool("terminal",
 - **Project isolation:** every registration, lease, profile, loop, result, checkpoint, and authorization is stored under one `project_id`.
 - **Original workspace preservation:** Development runs in `.worktrees/<task_id>` from the recorded `HEAD`; pre-existing source-workspace changes are not copied or modified.
 - **Concurrent-edit detection:** the source workspace Git-status digest is bound at dispatch and checked before checkpoint/commit authorization.
-- **Per-tool enforcement:** Autopilot-tenant workers fail closed without a durable binding and are blocked after lease expiry, kill activation, human-decision pause, loop cancellation, workspace escape, disallowed tools, background terminal use, or commit/push/destructive Git attempts.
+- **Per-tool enforcement:** Autopilot-tenant workers fail closed without a durable binding and are blocked after lease expiry, kill activation, human-decision pause, loop cancellation, workspace escape, disallowed tools, background terminal use, or Git writes outside the exact host-controlled `MERGING` command allowlist.
 - **Exact command profiles:** verifier checks and separately listed Development routine commands use structured argv/cwd/timeout configuration; shell wrappers, inline evaluation, composition, and interpolation are rejected.
 - **Trusted evidence:** verifier metadata must match project, loop, brief, task, run, starting revision, verification profile, changed paths, and every configured check.
 - **Bounded remediation:** the project profile sets a small maximum; exhausted or malformed results go to `NEEDS_HUMAN`.
 - **Human acceptance:** passing evidence only reaches `AWAITING_HUMAN_ACCEPTANCE`; `/autopilot loop accept` writes a separate immutable acceptance record.
-- **Separate commit gate:** acceptance does not commit. Checkpoint, commit authorization, and commit are three explicit actions. Authorization lasts 15 minutes and is one-time.
-- **No push or deployment:** the commit command creates a local commit only in the isolated worktree. Push, merge, deployment, migrations, external writes, credentials, and personal-account decisions remain outside this workflow.
+- **Verified promotion:** only accepted verifier evidence can enter `MERGING`; the reconciler records the commit revision before a fast-forward push to the bound target branch.
+- **No merge or deployment:** branch merges, releases, deployment, migrations, external writes, credentials, and personal-account decisions remain outside this workflow.
 - **Truthful cancellation:** stop first records `CANCEL_REQUESTED`, reclaims running tasks, blocks unfinished cards, and reports `CANCELED` only after confirmation.
 
 ## State Layout
@@ -115,10 +115,8 @@ $HERMES_HOME/state/autopilot/
 # Human gate after trusted verification evidence.
 /autopilot loop accept <loop_id>
 
-# Optional local commit sequence—three separate explicit actions.
-/autopilot loop checkpoint <loop_id>
-/autopilot loop authorize-commit <loop_id>
-/autopilot loop commit <loop_id>
+# The verified commit is already pushed by reconciliation. The worktree is retained
+# temporarily for diagnostics and the immutable evidence remains project-scoped.
 ```
 
 Interactive account-selection or consent flows are not automated. Any such requirement blocks for the user.
@@ -169,8 +167,8 @@ python -m pytest -q
 python scripts/runtime_e2e.py
 ```
 
-The isolated runtime E2E uses a temporary Hermes home and Git repository, exercises real Hermes Project/Kanban persistence through the complete accepted-checkpoint-authorized-local-commit path, and removes temporary state on exit. It never contacts a model provider or mutates a registered real project.
+The isolated runtime E2E uses a temporary Hermes home and Git repository and removes temporary state on exit. It never contacts a model provider or mutates a registered real project.
 
 The suite covers state/lease/policy security, plugin discovery and registration, verification profiles, live dispatch, worktree preservation, lifecycle reconciliation, trusted evidence, remediation limits, cancellation, checkpointing, commit authorization, and prohibited-pattern scans.
 
-No commit is made by the implementation or test workflow unless a user explicitly invokes the separate Autopilot commit commands for an accepted live loop.
+Test Git writes use fakes or temporary repositories; the suite never pushes to a registered real project.

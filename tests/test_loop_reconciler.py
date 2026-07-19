@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+import subprocess
 
 from autopilot.adapters.autonomous_loop import AutonomousLoopSupervisor
 from autopilot.adapters.development_executor import CommandResult
 from autopilot.adapters.loop_reconciler import LoopReconciler
-from autopilot.lease import build_lease_preset, lease_to_dict
+from autopilot.lease import build_lease_preset, lease_to_dict, validate_lease
 from autopilot.lifecycle import recover_active_loops
 from autopilot.storage import save_project_state
 from autopilot.verification import (
@@ -68,7 +70,14 @@ def _state(tmp_workspace):
     }
 
 
-def _loop(tmp_hermes_home, tmp_workspace, state, profile):
+def _loop(
+    tmp_hermes_home,
+    tmp_workspace,
+    state,
+    profile,
+    *,
+    starting_revision="abc123",
+):
     payload = {
         "loop_id": "loop-1",
         "project_id": "test-project-001",
@@ -79,7 +88,7 @@ def _loop(tmp_hermes_home, tmp_workspace, state, profile):
         "board_slug": "test-project-001",
         "development_task_id": "task-dev",
         "verifier_task_id": "task-verify",
-        "starting_revision": "abc123",
+        "starting_revision": starting_revision,
         "verification_profile_digest": verification_profile_digest(profile),
         "remediation_count": 0,
     }
@@ -117,14 +126,23 @@ def test_sync_accepts_only_valid_completed_verifier_evidence(
 ):
     profile = _profile(tmp_workspace)
     state = _state(tmp_workspace)
-    loop = _loop(tmp_hermes_home, tmp_workspace, state, profile)
+    starting_revision = "ref: refs/heads/Development"
+    loop = _loop(
+        tmp_hermes_home,
+        tmp_workspace,
+        state,
+        profile,
+        starting_revision=starting_revision,
+    )
+    worktree = tmp_workspace / ".worktrees" / "task-dev"
+    worktree.mkdir(parents=True)
     metadata = {
         "autopilot_contract_version": 1,
         "role": "verifier",
         "brief_id": "brief-1",
         "verification_status": "passed",
         "review_status": "approved",
-        "starting_revision": "abc123",
+        "starting_revision": starting_revision,
         "changed_files": ["lib/app.py"],
         "checks": [
             {
@@ -179,6 +197,27 @@ def test_sync_accepts_only_valid_completed_verifier_evidence(
                 ),
                 "",
             ),
+            ("git", "rev-parse", "--show-toplevel"): CommandResult(
+                0, str(worktree) + "\n", ""
+            ),
+            (
+                "git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            ): CommandResult(0, " M lib/app.py\x00", ""),
+            ("git", "add", "--all"): CommandResult(0, "", ""),
+            (
+                "git",
+                "commit",
+                "-m",
+                "autopilot(task-dev): brief-1",
+                "-m",
+                "Automated commit by Autopilot post-verification.",
+            ): CommandResult(0, "committed\n", ""),
+            ("git", "rev-parse", "HEAD"): CommandResult(
+                0, "abcdef1234567890\n", ""
+            ),
+            (
+                "git", "push", "origin", "HEAD:refs/heads/Development",
+            ): CommandResult(0, "pushed\n", ""),
         }
     )
     supervisor = AutonomousLoopSupervisor(hermes_home=tmp_hermes_home)
@@ -191,12 +230,19 @@ def test_sync_accepts_only_valid_completed_verifier_evidence(
 
     assert result.status == "AWAITING_HUMAN_ACCEPTANCE"
     assert result.evidence_path
+    assert result.commit_revision == "abcdef1234567890"
     evidence = json.loads(open(result.evidence_path, encoding="utf-8").read())
     assert evidence["accepted"] is True
     persisted = supervisor.list_loops("test-project-001")[0]
     assert persisted["status"] == "AWAITING_HUMAN_ACCEPTANCE"
     assert persisted["result_task_id"] == "task-verify"
     assert persisted["result_run_id"] == 9
+    assert persisted["commit_revision"] == "abcdef1234567890"
+    assert any(
+        call[0] == ("git", "push", "origin", "HEAD:refs/heads/Development")
+        and call[1] == str(worktree)
+        for call in runtime.calls
+    )
 
     acceptance = supervisor.accept_loop(
         project_id="test-project-001",
@@ -309,6 +355,144 @@ def test_failed_valid_evidence_queues_one_bounded_remediation_cycle(
     assert persisted["remediation_count"] == 1
     assert persisted["current_remediation_task_id"] == "task-remediate"
     assert persisted["verifier_task_id"] == "task-reverify"
+    assert not any(call[0][:2] == ("git", "push") for call in runtime.calls)
+
+
+def test_merge_failure_records_commit_revision_before_push_needs_human(
+    tmp_hermes_home,
+    tmp_workspace,
+):
+    profile = _profile(tmp_workspace)
+    state = _state(tmp_workspace)
+    loop = _loop(
+        tmp_hermes_home,
+        tmp_workspace,
+        state,
+        profile,
+        starting_revision="ref: refs/heads/Development",
+    )
+    worktree = tmp_workspace / ".worktrees" / "task-dev"
+    worktree.mkdir(parents=True)
+    runtime = FakeRuntime({
+        ("git", "rev-parse", "--show-toplevel"): CommandResult(
+            0, str(worktree) + "\n", ""
+        ),
+        (
+            "git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        ): CommandResult(0, " M lib/app.py\x00", ""),
+        ("git", "add", "--all"): CommandResult(0, "", ""),
+        (
+            "git",
+            "commit",
+            "-m",
+            "autopilot(task-dev): brief-1",
+            "-m",
+            "Automated commit by Autopilot post-verification.",
+        ): CommandResult(0, "committed\n", ""),
+        ("git", "rev-parse", "HEAD"): CommandResult(
+            0, "fedcba9876543210\n", ""
+        ),
+        (
+            "git", "push", "origin", "HEAD:refs/heads/Development",
+        ): CommandResult(1, "", "non-fast-forward"),
+    })
+    supervisor = AutonomousLoopSupervisor(hermes_home=tmp_hermes_home)
+
+    result = LoopReconciler(runtime, supervisor)._merge_worktree(
+        loop=loop | {"status": "MERGING"},
+        lease=validate_lease(state["lease"]),
+    )
+
+    assert result.success is False
+    assert result.commit_revision == "fedcba9876543210"
+    assert any("could not be pushed" in blocker for blocker in result.blockers)
+    persisted = supervisor.list_loops("test-project-001")[0]
+    assert persisted["status"] == "MERGING"
+    assert persisted["commit_revision"] == "fedcba9876543210"
+
+
+def test_merge_worktree_commits_and_pushes_real_git_repository(
+    tmp_hermes_home,
+    tmp_workspace,
+):
+    git_env = os.environ.copy()
+    git_env.update({
+        "GIT_AUTHOR_NAME": "Autopilot Test",
+        "GIT_AUTHOR_EMAIL": "autopilot" + chr(64) + "invalid.local",
+        "GIT_COMMITTER_NAME": "Autopilot Test",
+        "GIT_COMMITTER_EMAIL": "autopilot" + chr(64) + "invalid.local",
+    })
+
+    def git(*argv, cwd=None):
+        return subprocess.run(
+            ("git", *argv),
+            cwd=cwd,
+            env=git_env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    remote = tmp_workspace.parent / "remote.git"
+    git("init", "--bare", str(remote))
+    git("init", "-b", "Development", cwd=tmp_workspace)
+    (tmp_workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
+    git("add", "--all", cwd=tmp_workspace)
+    git("commit", "-m", "initial", cwd=tmp_workspace)
+    git("remote", "add", "origin", str(remote), cwd=tmp_workspace)
+    git("push", "-u", "origin", "Development", cwd=tmp_workspace)
+
+    worktree = tmp_workspace / ".worktrees" / "task-dev"
+    git("worktree", "add", "--detach", str(worktree), "Development", cwd=tmp_workspace)
+    (worktree / "app.py").write_text("value = 2\n", encoding="utf-8")
+
+    profile = _profile(tmp_workspace)
+    state = _state(tmp_workspace)
+    loop = _loop(
+        tmp_hermes_home,
+        tmp_workspace,
+        state,
+        profile,
+        starting_revision="ref: refs/heads/Development",
+    )
+
+    class GitRuntime:
+        def run(self, argv, *, cwd, timeout_seconds):
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=git_env,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            return CommandResult(
+                completed.returncode,
+                completed.stdout,
+                completed.stderr,
+            )
+
+    supervisor = AutonomousLoopSupervisor(hermes_home=tmp_hermes_home)
+    result = LoopReconciler(GitRuntime(), supervisor)._merge_worktree(
+        loop=loop | {"status": "MERGING"},
+        lease=validate_lease(state["lease"]),
+    )
+
+    remote_revision = git(
+        "--git-dir",
+        str(remote),
+        "rev-parse",
+        "refs/heads/Development",
+    ).stdout.strip()
+    commit_message = git("log", "-1", "--pretty=%B", cwd=worktree).stdout
+    assert result.success is True
+    assert result.commit_revision == remote_revision
+    assert commit_message == (
+        "autopilot(task-dev): brief-1\n\n"
+        "Automated commit by Autopilot post-verification.\n\n"
+    )
+    assert worktree.exists(), "worktree is retained for post-promotion diagnostics"
 
 
 def test_cancel_reclaims_running_worker_then_blocks_unfinished_pipeline(
