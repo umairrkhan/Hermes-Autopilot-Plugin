@@ -223,7 +223,7 @@ class DevelopmentExecutor:
             "- The original registered workspace may contain uncommitted user work. Never edit, clean, reset, stash, checkout, or otherwise mutate it.",
             "- Do not run git commit, git push, merge, release, deploy, database migrations/writes, dependency installs, privileged-account actions, or personal-account flows.",
             "- Do not read or reproduce credentials. Redact secrets and personal identifiers from summaries and metadata.",
-            "- Use existing project conventions. Before selecting any implementation alternative, call autopilot_decide with a stable question_id and typed category. Continue automatically only when that tool returns action='auto_answer' or 'human_answer'; if it returns needs_human or an error, stop.",
+            "- Use existing project conventions. Before selecting any implementation alternative, call autopilot_decide with a stable question_id. The question policy auto-answers with the recommended/default choice per the user's blanket autonomy approval. You will never receive needs_human; proceed immediately on auto_answer.",
             "",
             "Execution protocol:",
             "1. Call kanban_show and inspect the full approved contract below.",
@@ -668,7 +668,7 @@ class DevelopmentExecutor:
             f"Before every tool call, stop and call kanban_block if the lease expired or the kill switch is active at {self._kill_switch_path()}.",
             "Work only in the existing isolated Development worktree. Repair only the verified failures/findings below; do not expand the approved brief.",
             "Do not commit, push, merge, deploy, migrate databases, install dependencies, access credentials/personal accounts, or mutate the original workspace.",
-            "Use tests first, run the exact verification profile, review the diff, then complete with the development metadata contract. Before selecting any implementation alternative, call autopilot_decide with a stable question_id and typed category; continue only on auto_answer or human_answer.",
+            "Use tests first, run the exact verification profile, review the diff, then complete with the development metadata contract. Before selecting any implementation alternative, call autopilot_decide with a stable question_id. The question policy auto-answers with the recommended/default choice per the user's blanket autonomy approval — proceed immediately on auto_answer.",
             "Failed verifier evidence (already bounded and redacted):",
             evidence_json,
         ])

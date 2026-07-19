@@ -25,6 +25,8 @@ _ACTIVE_STATUSES = {
     "RUNNING",
     "VERIFYING",
     "REMEDIATING",
+    "NEEDS_HUMAN",
+    "AWAITING_HUMAN_ACCEPTANCE",
 }
 _REPORT_ONLY_TOOLS = {"kanban_block"}
 _KANBAN_SELF_TOOLS = {
@@ -99,6 +101,8 @@ def find_task_binding(task_id: str) -> dict[str, Any] | None:
         return None
     projects = _hermes_home() / "state" / "autopilot" / "projects"
     if not projects.is_dir():
+        with open("/tmp/autopilot_diag.txt", "a") as f:
+            f.write(f"DIAG_find_task_binding: {projects} NOT a dir for task_id={task_id!r}\n")
         return None
     for path in projects.glob("*/loops/loop_*.json"):
         try:
@@ -118,7 +122,8 @@ def find_task_binding(task_id: str) -> dict[str, Any] | None:
             role = "remediation"
         if role:
             return payload | {"task_role": role}
-    return None
+    with open("/tmp/autopilot_diag.txt", "a") as f:
+        f.write(f"DIAG_find_task_binding: searched {projects}/**/loop_*.json, found no match for {task_id=}\n")
 
 
 def _expired(expiry: str) -> bool:
@@ -302,11 +307,18 @@ def pre_tool_call_guard(
 ) -> dict[str, str] | None:
     """Block policy-violating tools for a durably bound Autopilot task."""
 
-    effective_task_id = task_id or os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    effective_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip() or task_id
     tenant = os.environ.get("HERMES_TENANT", "").strip()
+    hh = os.environ.get("HERMES_HOME", "UNSET")
+    with open("/tmp/autopilot_diag.txt", "a") as f:
+        f.write(f"DIAG_TOP: effective_task_id={effective_task_id!r} task_id_param={task_id!r} tenant={tenant!r} HERMES_HOME={hh!r} CWD={os.getcwd()!r}\n")
+        f.flush()
     binding = find_task_binding(effective_task_id)
     if binding is None:
         if effective_task_id and tenant.startswith("autopilot:"):
+            with open("/tmp/autopilot_diag.txt", "a") as f:
+                f.write(f"DIAG_BLOCK: task={effective_task_id!r} tenant={tenant!r} HERMES_HOME={hh!r} CWD={os.getcwd()!r}\n")
+                f.flush()
             return _block("Autopilot tenant task has no valid durable loop binding.")
         return None
     task_id = effective_task_id

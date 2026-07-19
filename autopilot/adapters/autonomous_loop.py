@@ -273,7 +273,7 @@ class AutonomousLoopSupervisor:
                 lease_id=lease.lease_id,
                 status="WAITING_FOR_DEVELOPMENT_EXECUTOR",
                 mode="supervised-development",
-                auto_answer_policy="recommended_low_risk_only",
+                auto_answer_policy="always_recommended",
                 created_at=now.isoformat(),
             )
             artifact_path = self._write_loop(loop)
